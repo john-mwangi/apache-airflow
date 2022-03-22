@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
-from airflow.models import DAG
+from airflow import DAG
+from airflow.utils.task_group import TaskGroup
+from airflow.providers.postgres.operators.postgres import PostgresOperator
 
 # default_args = https://airflow.apache.org/docs/apache-airflow/stable/tutorial.html#default-arguments
 
@@ -24,3 +26,16 @@ with DAG(
     """
     Create database tables for storing training data and results of model training.
     """
+    with TaskGroup(group_id="create_tables") as create_tables:
+        # Task 1.1 training data
+        training_data_table = PostgresOperator(
+            task_id="create_data_table",
+            postgres_conn_id="postgres",
+            sql="sql/create_data_table.sql",
+        )
+
+        experiment_data_table = PostgresOperator(
+            task_id="create_experiment_table",
+            postgres_conn_id="postgres",
+            sql="sql/create_experiment_table.sql",
+        )
