@@ -170,6 +170,10 @@ class AirflowPipeline:
 
 
 if __name__ == "__main__":
+    import sklearn
+
     ap = AirflowPipeline()
     ap.load_data()
     ap.run_train()
+    print(sklearn.__version__)
+    print(np.__version__)
