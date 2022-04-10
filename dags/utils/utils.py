@@ -116,7 +116,7 @@ class AirflowPipeline:
         )
 
         log_reg_cv.fit(X=train_X, y=train_y)
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = datetime.now().timestamp()
 
         # Retrieve best params
         best_penalty = log_reg_cv.best_params_.get("log_reg__C")
@@ -136,13 +136,14 @@ class AirflowPipeline:
         ## timestamp, train_params, train_results (best_params), test_performance
         train_results = pd.DataFrame(
             data={
-                "experiment_datetime": ts,
-                "cv_folds": config.CV_FOLDS,
-                "logreg_maxiter": config.MAX_ITER,
+                "timestamp_utc": ts,
+                "train_size": config.TRAIN_SIZE,
                 "max_pca_components": max_pca,
-                "best_logreg_c": best_penalty,
+                "cv_folds": config.CV_FOLDS,
+                "max_iter": config.MAX_ITER,
+                "best_penalty": best_penalty,
                 "best_pca_components": best_num_comp,
-                "test_set_accuracy": auc,
+                "auroc": auc,
             },
             index=[0],
         )
@@ -155,7 +156,7 @@ class AirflowPipeline:
         train_results = self.load_files(files=["train_results"])
         train_results = list(train_results)[0]
         train_results.to_sql(
-            name="experiments",
+            name="training_results",
             con=config.DB_STRING,
             if_exists="append",
             index=False,

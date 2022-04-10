@@ -41,17 +41,17 @@ with DAG(
 
     with TaskGroup(group_id="create_tables") as create_tables:
         # Task 1.1 training data
-        training_data_table = PostgresOperator(
-            task_id="create_data_table",
+        create_training_data_table = PostgresOperator(
+            task_id="create_training_data_table",
             postgres_conn_id="postgres",
-            sql="sql/create_data_table.sql",
+            sql="sql/create_training_data_table.sql",
         )
 
         # Task 1.2 training results
-        experiment_data_table = PostgresOperator(
-            task_id="create_experiment_table",
+        create_training_results_table = PostgresOperator(
+            task_id="create_training_results_table",
             postgres_conn_id="postgres",
-            sql="sql/create_experiment_table.sql",
+            sql="sql/create_training_results_table.sql",
         )
 
     # Task 2: Use a python function to load data into database.
