@@ -1,3 +1,7 @@
 logs
 *.docx
 *.pyc
+__pycache__
+.DS_Store
+*.bin
+notes
