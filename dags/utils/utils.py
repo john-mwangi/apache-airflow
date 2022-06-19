@@ -4,6 +4,7 @@ from datetime import datetime
 import dill
 import numpy as np
 import pandas as pd
+from google.cloud import bigquery
 
 from sklearn.datasets import load_breast_cancer
 from sklearn.decomposition import PCA
@@ -168,6 +169,81 @@ class AirflowPipeline:
             file=os.path.join(config.OUT_PATH, f"model_{ts}.bin"), mode="wb"
         ) as f:
             dill.dump(obj=model, file=f)
+
+    def read_bq_table(
+        self,
+        ti,
+        tablename: str,
+        datasetid: str,
+        projectid: str,
+        clean: bool = False,
+        primary_key: str = "",
+    ) -> pd.DataFrame:
+        """Fetches a Big Query table."""
+
+        project_ref = bigquery.Client(project=projectid)
+        sql_query = f"SELECT * from {datasetid}.{tablename}"
+        res = project_ref.query(sql_query)
+        rows = res.result()
+
+        df = rows.to_dataframe()
+        if clean:
+            df = df.drop_duplicates(subset=primary_key).dropna(
+                subset=primary_key
+            )
+
+        # self.save_files({"dataframe": df})
+        ti.xcom_push(key="dataframe", value=df.to_dict("records"))
+
+    def print_df_shape(self, ti):
+        df_dict = ti.xcom_pull(task_ids="read_bq_table", key="dataframe")
+        df = pd.DataFrame(df_dict)
+        # df = self.load_files(files=["dataframe"])
+        # df = list(df)[0]
+        print(df.shape)
+
+    def write_bq_table(
+        self,
+        ti,
+        bqprojectid: str,
+        datasetid: str,
+        tablename: str,
+        table_schema=config.TABLE_SCHEMA,
+        truncate: bool = True,
+    ):
+        """Writes a pandas dataframe to BigQuery.
+
+        Args:
+        ----
+        truncate: bool, if True, truncates the BigQuery table before writing. If False, appends.
+        """
+
+        df_dict = ti.xcom_pull(
+            key="dataframe",
+            task_ids="read_bq_table",
+        )
+
+        df = pd.DataFrame(df_dict)
+        # df = self.load_files(files=["dataframe"])
+        # df = list(df)[0]
+
+        client = bigquery.Client()
+        tableid = f"{bqprojectid}.{datasetid}.{tablename}"
+
+        if truncate:
+            res = client.query(f"TRUNCATE TABLE {tableid}")
+            res.result()
+            client.load_table_from_dataframe(dataframe=df, destination=tableid)
+        else:
+            errors = client.insert_rows_from_dataframe(
+                table=tableid, dataframe=df, selected_fields=table_schema
+            )
+
+            for error in errors:
+                if error:
+                    print("Error:", error)
+
+        print(f"Insertion complete.")
 
 
 if __name__ == "__main__":
