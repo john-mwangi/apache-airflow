@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import dill
 import numpy as np
@@ -15,6 +15,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from . import config
+
+import pytz
 
 # import config
 
@@ -244,6 +246,228 @@ class AirflowPipeline:
                     print("Error:", error)
 
         print(f"Insertion complete.")
+
+
+class LoanBook:
+    DUE_DATE = datetime.now()
+    EXCLUDE_PERIOD = int(DUE_DATE.strftime("%Y%m"))
+
+    analysis_cols = [
+        "loanId",
+        "loan_due",
+        "loanAmount",
+        "category_90",
+        "status",
+        "amount_collected",
+        "principal_due",
+        "isRepaid",
+        "isOutstanding",
+        "disbursed_ym",
+    ]
+
+    col_names = {
+        "disbursed_ym": "Period",
+        "loanAmount": "Total Disbursed Amount",
+        "outstanding_loanAmount": "Outstanding Amount",
+        "outstanding_loan_count": "Outstanding Loans",
+        "active_loanAmount": "Active Outstanding Amount",
+        "active_loan_count": "Active Outstanding Loans",
+    }
+
+    default_args = {
+        "email": ["alerts.mwangi@gmail.com"],
+        "email_on_failure": False,
+        "email_on_retry": False,
+        "retries": 3,
+        "retry_delay": timedelta(minutes=5),
+        "start_date": datetime(year=2022, month=3, day=21, hour=20, minute=13),
+    }
+    # GCP Key
+    airflow_gcp_key = "/Users/johnmwangi/Work/payhippo/keys/adc/application_default_credentials.json"
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = airflow_gcp_key
+
+    def read_bq_table(
+        tablename: str,
+        datasetid: str,
+        projectid: str = "payhippo",
+        clean: bool = False,
+        primary_key: str = None,
+    ) -> pd.DataFrame:
+        """Fetches a Big Query table."""
+
+        project_ref = bigquery.Client(project=projectid)
+        sql_query = f"SELECT * from {datasetid}.{tablename}"
+        res = project_ref.query(sql_query)
+        rows = res.result()
+
+        df = rows.to_dataframe()
+        if clean:
+            if not primary_key:
+                raise ValueError("provide a primary key")
+            df = df.drop_duplicates(subset=primary_key).dropna(
+                subset=primary_key
+            )
+
+        return df
+
+    def calculate_principal_due(repaymentSchedules: pd.DataFrame) -> list:
+        """Calculates the principal due for each repayment schedule.
+        A helper function to add_payments_due_collected().\n
+        if principalPayment is not NA, then principal_due is principalPayment\n
+        if principalPayment is NA,then the principal due is the loanAmount when the paymentType is INTEREST_AND_PRINCIPAL_PAYMENT\n
+        else, it is 0
+
+        Args:
+        ----
+        repaymentSchedules: repaymentSchedules_proc - repaymentSchedules ready for analysis.
+        """
+        principal_due = []
+        for principalPayment, loanAmount, paymentType in zip(
+            repaymentSchedules.principalPayment,
+            repaymentSchedules.loanAmount,
+            repaymentSchedules.paymentType,
+        ):
+            if not pd.isna(principalPayment):
+                principal_due.append(principalPayment)
+            elif pd.isna(principalPayment) & (
+                paymentType == "INTEREST_AND_PRINCIPAL_PAYMENT"
+            ):
+                principal_due.append(loanAmount)
+            elif paymentType == "INTEREST_AND_ADMIN_FEE_PAYMENT":
+                principal_due.append(0)
+            else:
+                raise ValueError(
+                    "error on:", principalPayment, loanAmount, paymentType
+                )
+        return principal_due
+
+    def calculate_dpd(
+        df: pd.DataFrame, return_days=False, DUE_DATE=DUE_DATE
+    ) -> list:
+        """Calculates the days past due for each loan. Used in the parse_dpd function.
+
+        Args:
+        ----
+        df: loans_proc.
+        return_days: setting this to True returns dpd as an integer instead of timedelta.
+
+        Returns:
+        ----
+        Number of days past due of a loan as timedelta.
+        """
+        DUE_DATE = DUE_DATE.replace(tzinfo=pytz.utc)
+        dpd = []
+        for repaidDate, repaymentDate in zip(
+            df.loanRepaidDate, df.repaymentDate
+        ):
+            if pd.isnull(repaidDate) or repaidDate.year == 1970:
+                _dpd = DUE_DATE - repaymentDate
+                _dpd = _dpd
+                if return_days:
+                    _dpd = _dpd.days
+            else:
+                _dpd = repaidDate - repaymentDate
+                if return_days:
+                    _dpd = _dpd.days
+            dpd.append(_dpd)
+
+        return dpd
+
+    def create_category(df: pd.DataFrame, size=180) -> list:
+        """Groups the days past due into categories. This will allow us to
+        categorise principal collected into <=180 or >180. Used in the parse_dpd
+        function.
+
+        Args:
+        ----
+        df: loans_proc.
+        size: category size.
+
+        Returns:
+        ----
+        Groups loans into categories.
+        """
+
+        category = []
+        for dpd in df.dpd:
+            if 1 <= dpd <= size:
+                category.append(f"1-{size}")
+            elif dpd <= 0:
+                category.append("0")
+            elif dpd > size:
+                category.append(f">{size}")
+            else:
+                raise ValueError(f"dpd is unknown: {dpd}")
+        return category
+
+    def parse_dpd(self, loans: pd.DataFrame) -> pd.DataFrame:
+        """Adds the number of days past due to the loans collection as well as
+        categorising the days past due.
+
+        Args:
+        ----
+        loans: loans_proc.
+        """
+
+        loans_dpd = loans.assign(
+            dpd=lambda df: self.calculate_dpd(df=df, return_days=True),
+            category_180=lambda df: self.create_category(df=df, size=180),
+            category_90=lambda df: self.create_category(df=df, size=90),
+        )
+
+        return loans_dpd
+
+    def get_loan_collections(
+        self, repaymentSchedules: pd.DataFrame
+    ) -> pd.DataFrame:
+        loan_collections = (
+            repaymentSchedules.assign(
+                principal_due_=lambda df: self.calculate_principal_due(df),
+                principal_due=lambda df: df.principal_due_.astype(float),
+            )[["loanId", "totalPaymentWithinSchedule", "principal_due"]]
+            .assign(
+                totalPaymentWithinSchedule=lambda df: df.totalPaymentWithinSchedule.astype(
+                    float
+                )
+            )
+            .groupby("loanId", as_index=False)
+            .aggregate(
+                amount_collected=("totalPaymentWithinSchedule", "sum"),
+                principal_due=("principal_due", "sum"),
+            )
+        )
+
+        return loan_collections
+
+    def process_loans(
+        self, loans: pd.DataFrame, loan_collections: pd.DataFrame
+    ) -> pd.DataFrame:
+        loans_proc = (
+            loans.assign(
+                disbursed_ym=lambda df: df.disbursementDateWAT.dt.strftime(
+                    "%Y%m"
+                ),
+                loanRepaidDateWAT=lambda df: df.loanRepaidDate.dt.tz_convert(
+                    "Africa/Lagos"
+                ),
+                loan_due=lambda df: np.where(
+                    df.repaymentDateWAT > self.DUE_DATE, True, False
+                ),
+            )[lambda df: pd.notna(df.disbursed_ym)]
+            .merge(right=loan_collections, how="left", on="loanId")
+            .assign(
+                disbursed_ym=lambda df: df.disbursed_ym.astype(int),
+                isRepaid=lambda df: df.status.str.lower()
+                .str.strip()
+                .str.contains("paid")
+                | df.loanRepaidDateWAT.notna(),
+                isOutstanding=lambda df: df.amount_collected < df.loanAmount,
+            )
+            .pipe(self.parse_dpd)
+            .query(f"disbursed_ym < {self.EXCLUDE_PERIOD}")
+        )
+
+        return loans_proc
 
 
 if __name__ == "__main__":
